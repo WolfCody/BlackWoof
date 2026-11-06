@@ -1,0 +1,142 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.90.0"
+  NDK_VERSION: "29.0.14206865"
+  BUILD_TOOLS_VERSION: "35.0.0"
+  PLATFORM_API: "35"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-linux-android
+          rustup default "$RUST_VERSION"
+          rustc --version
+          cargo --version
+
+      - name: Android SDK components
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "ndk;$NDK_VERSION" "build-tools;$BUILD_TOOLS_VERSION" "platforms;android-$PLATFORM_API"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Cargo.lock
+        run: |
+          if [ -f Cargo.lock ]; then
+            echo "Cargo.lock is committed."
+          else
+            echo "::warning::Cargo.lock is not committed. It is generated now and does not pin dependency versions across separate runs. Commit it from the build artifact."
+            cargo generate-lockfile
+          fi
+          # GITHUB_ENV is read by the steps after this one, not by this step.
+          # Every later Cargo command that supports --locked uses it.
+          echo "LOCKED=--locked" >> "$GITHUB_ENV"
+
+      - name: Test fixtures (CI only; ffmpeg is not part of the app)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          mkdir -p fixtures
+          ff() { ffmpeg -hide_banner -loglevel error -y "$@"; }
+          ff -f lavfi -i "sine=frequency=440:duration=3:sample_rate=44100" -ac 2 fixtures/src_stereo.wav
+          ff -i fixtures/src_stereo.wav -c:a libmp3lame -b:a 128k -id3v2_version 3 -metadata title=Test fixtures/stereo_id3.mp3
+          ff -i fixtures/src_stereo.wav -c:a flac fixtures/stereo.flac
+          ff -i fixtures/src_stereo.wav -c:a libvorbis -q:a 4 fixtures/stereo.ogg
+          ff -f lavfi -i "sine=frequency=330:duration=3:sample_rate=22050" -ac 1 -c:a libmp3lame -b:a 64k fixtures/mono22k.mp3
+          # MP3 with an embedded cover picture: the decoder must skip the picture, not keep it.
+          cover="$RUNNER_TEMP/cover.jpg"
+          ff -f lavfi -i "testsrc2=size=1500x1500:rate=1" -frames:v 1 -q:v 2 "$cover"
+          ff -i fixtures/src_stereo.wav -i "$cover" -map 0:a -map 1:v -c:a libmp3lame -b:a 128k -c:v copy -id3v2_version 3 -metadata:s:v title=Cover -metadata:s:v comment="Cover (front)" fixtures/stereo_cover.mp3
+          ls -l fixtures
+
+      - name: Host tests (x86_64, with real MP3/FLAC/OGG fixtures)
+        run: |
+          BW_FIXTURES="$PWD/fixtures" cargo test --lib ${LOCKED:?LOCKED is not set} 2>&1 | tee test-output.txt
+
+      - name: Build APK (with native library and DEX repeatability check)
+        run: |
+          REPEAT_CHECK=1 bash scripts/build_apk.sh 2>&1 | tee build-output.txt
+
+      - name: Verify APK
+        run: |
+          bash scripts/verify_apk.sh build/BlackWoof-stage2.apk 2>&1 | tee verify-output.txt
+
+      - name: Dependency policy
+        run: |
+          cargo tree --target aarch64-linux-android -e normal --prefix none ${LOCKED:?LOCKED is not set} | sort -u | tee build/deps.txt
+          echo "crates in the tree: $(wc -l < build/deps.txt)"
+          # Forbidden: real logging implementations and network crates.
+          # NOT forbidden: the `log` facade itself. It is unavoidable (every Symphonia crate needs
+          # it) and is allowed only when compiled out, which is checked strictly below.
+          FORBIDDEN='(env[_-]logger|pretty[_-]env[_-]logger|android[_-]logger|fern|simplelog|log4rs|flexi[_-]logger|slog(-[a-z0-9_-]+)?|tracing(-[a-z0-9_-]+)?|syslog|stderrlog|femme|tokio|reqwest|hyper|h2|rustls|openssl|native-tls|ureq|curl|serde|serde_json)'
+          if grep -Eq "^${FORBIDDEN} " build/deps.txt; then
+            echo "::error::forbidden crate in the dependency tree:"
+            grep -E "^${FORBIDDEN} " build/deps.txt
+            exit 1
+          fi
+          echo "== log feature graph (for inspection)"
+          cargo tree --target aarch64-linux-android -e features -i log ${LOCKED:?LOCKED is not set} | tee build/log-features.txt
+          echo "== log facade policy (strict: one version, max_level_off enabled)"
+          cargo metadata --format-version 1 --filter-platform aarch64-linux-android ${LOCKED:?LOCKED is not set} | python3 scripts/check_log_facade.py | tee build/log-policy.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## BLACK WOOF Stage 2"
+            echo
+            echo "### Host tests"
+            echo '```'
+            grep -E '^test result|^test .* FAILED|panicked at' test-output.txt || echo "no test output"
+            echo '```'
+            echo "### Build and APK checks"
+            echo '```'
+            grep -E '^(REPEAT|BUILD OK)' build-output.txt || echo "no build output"
+            grep -E '^(OK|FAIL|SIZE|ALL CHECKS)' verify-output.txt || echo "no verification output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blackwoof-stage2
+          if-no-files-found: warn
+          path: |
+            build/BlackWoof-stage2.apk
+            build/libblackwoof.so
+            build/deps.txt
+            build/log-features.txt
+            build/log-policy.txt
+            Cargo.lock
+            test-output.txt
+            build-output.txt
+            verify-output.txt

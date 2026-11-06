@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stage 2 test build. Deliberately no <uses-permission>: the app needs none, and
+     INTERNET must never appear. minSdk/targetSdk/version are passed to aapt2 by
+     scripts/build_apk.sh. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.dzekiwolf.blackwoof">
+
+    <application
+        android:label="BLACK WOOF"
+        android:allowBackup="false"
+        android:extractNativeLibs="false"
+        android:theme="@android:style/Theme.Black.NoTitleBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,35 @@
+[package]
+name = "blackwoof"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "BLACK WOOF: offline audio engine (Stage 2)"
+
+[lib]
+name = "blackwoof"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Decoding: only what the approved format list needs (MP3, FLAC, WAV/PCM, OGG Vorbis).
+# id3v1/id3v2 are tag parsers the probe needs in order to skip tags around MP3 frames.
+# No "opt-simd*" features: they pull in rustfft. To be measured in Stage 7, not assumed.
+symphonia = { version = "=0.6.0", default-features = false, features = [
+    "flac", "mp3", "ogg", "pcm", "vorbis", "wav", "id3v1", "id3v2",
+] }
+
+# Every Symphonia crate depends on `log`, so it cannot be removed from the tree.
+# This line adds NO logging: it only compiles every `log` macro out (no logger exists).
+# `max_level_off` sets the static level to Off in every profile, release included.
+# CI fails unless exactly one `log` version is resolved and it has this feature.
+log = { version = "0.4", features = ["max_level_off"] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+# Stage 2 decision: unwind, so that catch_unwind can contain a panic in the decoder.
+panic = "unwind"
+strip = "symbols"
+debug = false
+incremental = false

@@ -1,0 +1,9 @@
+/target
+/build
+/fixtures
+*.jks
+*.keystore
+*.idsig
+/test-output.txt
+/build-output.txt
+/verify-output.txt
