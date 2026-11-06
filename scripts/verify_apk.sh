@@ -32,12 +32,12 @@ ok "no permissions requested (no INTERNET)"
 
 # --- badging: SDK levels and ABI ------------------------------------------------------------
 BADGING="$("$BT/aapt2" dump badging "$APK")"
-grep -E "^(package|sdkVersion|targetSdkVersion|native-code|application-label):" <<<"$BADGING" || true
+grep -E "^(package|minSdkVersion|targetSdkVersion|native-code|application-label):" <<<"$BADGING" || true
 EXPECTED_PACKAGE="com.dzekiwolf.blackwoof"
 grep -Eq "^package: name='${EXPECTED_PACKAGE//./\\.}'( |\$)" <<<"$BADGING" \
   || fail "package name is not $EXPECTED_PACKAGE"
 ok "package name is $EXPECTED_PACKAGE"
-grep -q "^sdkVersion:'28'" <<<"$BADGING" || fail "minSdk is not 28"
+grep -q "^minSdkVersion:'28'" <<<"$BADGING" || fail "minSdk is not 28"
 grep -q "^targetSdkVersion:'35'" <<<"$BADGING" || fail "targetSdk is not 35"
 grep -q "^native-code: 'arm64-v8a'$" <<<"$BADGING" || fail "native-code is not exactly arm64-v8a"
 ok "minSdk 28, targetSdk 35, ABI arm64-v8a only"
