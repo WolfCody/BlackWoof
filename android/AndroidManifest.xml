@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Exactly two permissions, both for the foreground service that keeps playback alive.
-     Never INTERNET, never anything else: scripts/verify_apk.sh enforces this exact set.
-     minSdk/targetSdk/version are passed to aapt2 by scripts/build_apk.sh. -->
+<!-- Stage 3.1: local audio library + foreground service.
+     INTERNET must never appear. minSdk/targetSdk/version are passed to aapt2 by
+     scripts/build_apk.sh. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dzekiwolf.blackwoof">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
         android:label="BLACK WOOF"

@@ -23,20 +23,21 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 [ -f "$APK" ] || fail "APK not found: $APK"
 
-# --- permissions: none at all in Stage 2, and never INTERNET -------------------------------
+# --- permissions: foreground service + local audio library; never INTERNET ----------------
 PERMS="$("$BT/aapt2" dump permissions "$APK")"
 echo "$PERMS"
 if grep -q 'android.permission.INTERNET' <<<"$PERMS"; then fail "INTERNET permission present"; fi
-# Since Stage 3 the allowed set is exactly the two foreground-service permissions.
 PERM_NAMES="$(sed -n "s/^uses-permission[a-z0-9-]*: name='\([^']*\)'.*/\1/p" <<<"$PERMS" | LC_ALL=C sort)"
 EXPECTED_PERMS="android.permission.FOREGROUND_SERVICE
-android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK
+android.permission.READ_EXTERNAL_STORAGE
+android.permission.READ_MEDIA_AUDIO"
 if [ "$PERM_NAMES" != "$EXPECTED_PERMS" ]; then
   echo "found:    $(tr '\n' ' ' <<<"$PERM_NAMES")"
   echo "expected: $(tr '\n' ' ' <<<"$EXPECTED_PERMS")"
   fail "requested permissions differ from the allowed set"
 fi
-ok "permissions are exactly FOREGROUND_SERVICE and FOREGROUND_SERVICE_MEDIA_PLAYBACK (no INTERNET)"
+ok "permissions: foreground service + local audio read; no INTERNET"
 
 # --- badging: SDK levels and ABI ------------------------------------------------------------
 BADGING="$("$BT/aapt2" dump badging "$APK")"
