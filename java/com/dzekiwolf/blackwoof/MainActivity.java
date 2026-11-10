@@ -19,6 +19,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.LinearLayout;
 import android.widget.ListView;
@@ -155,11 +156,14 @@ public final class MainActivity extends Activity {
         trackList.setBackgroundColor(Color.BLACK);
         trackList.setDivider(null);
         trackList.setCacheColorHint(Color.BLACK);
-        trackList.setOnItemClickListener((parent, view, position, id) -> {
-            if (position >= 0 && position < tracks.size()) {
-                Track selected = tracks.get(position);
-                play(selected.uri(), selected.title, selected.artist);
-                showPlayer();
+        trackList.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+            @Override
+            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= 0 && position < tracks.size()) {
+                    Track selected = tracks.get(position);
+                    play(selected.uri(), selected.title, selected.artist);
+                    showPlayer();
+                }
             }
         });
         root.addView(trackList, new LinearLayout.LayoutParams(
