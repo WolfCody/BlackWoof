@@ -1,3 +1,4 @@
+++ b/java/com/dzekiwolf/blackwoof/MainActivity.java
 package com.dzekiwolf.blackwoof;
 
 import android.Manifest;
@@ -193,8 +194,6 @@ public final class MainActivity extends Activity {
         scanLibrary();
     }
 
-<<<<<<< ours
-=======
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
@@ -286,7 +285,6 @@ public final class MainActivity extends Activity {
         trackList.setAdapter(adapter);
     }
 
->>>>>>> theirs
     private void pickFile() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -294,7 +292,6 @@ public final class MainActivity extends Activity {
         startActivityForResult(intent, REQUEST_PICK);
     }
 
-    @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_PICK && resultCode == RESULT_OK
@@ -331,17 +328,13 @@ public final class MainActivity extends Activity {
         int code = Native.nativePlay(fd);
         note = code == 0 ? "" : errorText(code);
         if (code == 0) {
-<<<<<<< ours
+            currentTitle = title == null ? "" : title;
+            currentArtist = artist == null ? "" : artist;
             startPlaybackService();
         }
-        refresh();
+        refreshPlayer();
     }
 
-    /**
-     * Starts the foreground service from this user action while the Activity is visible (the
-     * Android 15/17 rule). The service ends itself when Rust reports the end of playback, and
-     * leaving this screen does not stop the music.
-     */
     private void startPlaybackService() {
         try {
             startForegroundService(new Intent(this, PlayerService.class));
@@ -350,17 +343,8 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void refresh() {
-=======
-            currentTitle = title == null ? "" : title;
-            currentArtist = artist == null ? "" : artist;
-        }
-        refreshPlayer();
-    }
-
     private void refreshPlayer() {
         if (stateView == null || showingLibrary) return;
->>>>>>> theirs
         StringBuilder text = new StringBuilder();
         if (!Native.LOADED) text.append("Engine: not loaded");
         else {
@@ -410,25 +394,3 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private TextView label(String text) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(GRAY);
-        view.setTypeface(Typeface.MONOSPACE);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        return view;
-    }
-
-    private TextView button(String text, View.OnClickListener onClick) {
-        TextView view = label(text);
-        view.setMinHeight(dp(48));
-        view.setGravity(Gravity.CENTER_VERTICAL);
-        view.setClickable(true);
-        view.setOnClickListener(onClick);
-        return view;
-    }
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-}
