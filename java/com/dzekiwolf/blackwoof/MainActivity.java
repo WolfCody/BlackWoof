@@ -86,13 +86,6 @@ public final class MainActivity extends Activity {
         super.onResume();
         if (!showingLibrary) refreshPlayer();
     }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (isFinishing() && Native.LOADED) Native.nativeShutdown();
-    }
-
     private void showPlayer() {
         showingLibrary = false;
         root = new LinearLayout(this);
