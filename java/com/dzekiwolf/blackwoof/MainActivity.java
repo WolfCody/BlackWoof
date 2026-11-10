@@ -291,6 +291,7 @@ public final class MainActivity extends Activity {
         startActivityForResult(intent, REQUEST_PICK);
     }
 
+    @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_PICK && resultCode == RESULT_OK
@@ -393,3 +394,25 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private TextView label(String text) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextColor(GRAY);
+        view.setTypeface(Typeface.MONOSPACE);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        return view;
+    }
+
+    private TextView button(String text, View.OnClickListener onClick) {
+        TextView view = label(text);
+        view.setMinHeight(dp(48));
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setClickable(true);
+        view.setOnClickListener(onClick);
+        return view;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+}
