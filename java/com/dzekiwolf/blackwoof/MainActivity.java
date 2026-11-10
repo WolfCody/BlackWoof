@@ -1,4 +1,3 @@
-++ b/java/com/dzekiwolf/blackwoof/MainActivity.java
 package com.dzekiwolf.blackwoof;
 
 import android.Manifest;
