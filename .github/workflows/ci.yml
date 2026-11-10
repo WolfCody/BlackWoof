@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      update_lock:
+        description: "Add packages missing from Cargo.lock (versions already locked stay). Use once after changing dependencies, then commit the Cargo.lock artifact."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -49,12 +54,17 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Cargo.lock
+        env:
+          UPDATE_LOCK: ${{ inputs.update_lock }}
         run: |
-          if [ -f Cargo.lock ]; then
-            echo "Cargo.lock is committed."
-          else
+          if [ ! -f Cargo.lock ]; then
             echo "::warning::Cargo.lock is not committed. It is generated now and does not pin dependency versions across separate runs. Commit it from the build artifact."
             cargo generate-lockfile
+          elif [ "$UPDATE_LOCK" = "true" ]; then
+            echo "::warning::update_lock requested: packages missing from Cargo.lock are added, versions already locked stay. Review the difference and commit Cargo.lock from the build artifact."
+            cargo update --workspace
+          else
+            echo "Cargo.lock is committed."
           fi
           # GITHUB_ENV is read by the steps after this one, not by this step.
           # Every later Cargo command that supports --locked uses it.

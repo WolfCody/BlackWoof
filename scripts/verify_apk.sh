@@ -27,8 +27,16 @@ fail() { echo "FAIL: $*"; exit 1; }
 PERMS="$("$BT/aapt2" dump permissions "$APK")"
 echo "$PERMS"
 if grep -q 'android.permission.INTERNET' <<<"$PERMS"; then fail "INTERNET permission present"; fi
-if grep -q 'uses-permission' <<<"$PERMS"; then fail "unexpected permission requested"; fi
-ok "no permissions requested (no INTERNET)"
+# Since Stage 3 the allowed set is exactly the two foreground-service permissions.
+PERM_NAMES="$(sed -n "s/^uses-permission[a-z0-9-]*: name='\([^']*\)'.*/\1/p" <<<"$PERMS" | LC_ALL=C sort)"
+EXPECTED_PERMS="android.permission.FOREGROUND_SERVICE
+android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+if [ "$PERM_NAMES" != "$EXPECTED_PERMS" ]; then
+  echo "found:    $(tr '\n' ' ' <<<"$PERM_NAMES")"
+  echo "expected: $(tr '\n' ' ' <<<"$EXPECTED_PERMS")"
+  fail "requested permissions differ from the allowed set"
+fi
+ok "permissions are exactly FOREGROUND_SERVICE and FOREGROUND_SERVICE_MEDIA_PLAYBACK (no INTERNET)"
 
 # --- badging: SDK levels and ABI ------------------------------------------------------------
 BADGING="$("$BT/aapt2" dump badging "$APK")"
@@ -85,10 +93,13 @@ grep -q '^libaaudio.so$' <<<"$NEEDED" || fail "libaaudio.so is not linked"
 ok "dependencies are limited to libaaudio, libc, libm, libdl"
 
 EXPORTS="$("$NM" -D --defined-only "$SO" | awk '{ print $3 }' | grep "^$JNI_PREFIX" | sort || true)"
-for name in nativeApiVersion nativePlay nativePause nativeResume nativeStop nativeState nativeShutdown; do
+for name in nativeApiVersion nativePlay nativePause nativeResume nativeStop nativeState nativeIsActive nativeShutdown; do
   grep -qx "$JNI_PREFIX$name" <<<"$EXPORTS" || fail "missing JNI export: $name"
 done
-ok "all 7 JNI exports are present"
+ok "all 8 JNI exports are present"
+ALL_DEFINED="$("$NM" -D --defined-only "$SO" | awk '{ print $3 }')"
+grep -qx 'JNI_OnLoad' <<<"$ALL_DEFINED" || fail "missing JNI_OnLoad (Rust to Java callbacks)"
+ok "JNI_OnLoad is present"
 
 UNDEFINED="$("$NM" -D --undefined-only "$SO")"
 if grep -qi '__android_log' <<<"$UNDEFINED"; then

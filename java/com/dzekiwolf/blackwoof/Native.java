@@ -6,7 +6,7 @@ package com.dzekiwolf.blackwoof;
  */
 final class Native {
     /** Must match API_VERSION in src/android_bridge.rs. */
-    static final int API_VERSION = 2;
+    static final int API_VERSION = 3;
 
     static final boolean LOADED;
 
@@ -40,6 +40,9 @@ final class Native {
 
     /** Low 8 bits: state; bits 8..15: error kind after a failure; -1 if a panic was caught. */
     static native int nativeState();
+
+    /** 1 while a track is opening, playing or paused (the service has a reason to run), else 0. */
+    static native int nativeIsActive();
 
     static native int nativeShutdown();
 }

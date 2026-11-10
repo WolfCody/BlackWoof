@@ -24,6 +24,12 @@ symphonia = { version = "=0.6.0", default-features = false, features = [
 # CI fails unless exactly one `log` version is resolved and it has this feature.
 log = { version = "0.4", features = ["max_level_off"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Rust -> Java calls: the service learns about the end of playback from Rust (and, in a later
+# step, MediaSession metadata). Android only, so host tests do not build it. Pinned exactly:
+# 0.22 changes the thread-attach API. Its size cost is measured by CI (compare the .so size).
+jni = { version = "=0.21.1", default-features = false }
+
 [profile.release]
 opt-level = "s"
 lto = "fat"

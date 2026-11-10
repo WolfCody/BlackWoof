@@ -43,6 +43,11 @@ pub trait Sink {
 /// Creates the sink. Called on the playback thread, once per track.
 pub type SinkFactory = Arc<dyn Fn() -> Box<dyn Sink> + Send + Sync>;
 
+/// Told about every state change after `Opening` (Playing, Paused and the final states).
+/// Runs on the playback thread, after the state is visible and with no lock held. It must be
+/// quick and must not touch the audio output. A panic inside it is contained.
+pub type Observer = Arc<dyn Fn(State, Option<ErrorKind>) + Send + Sync>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum State {
@@ -59,6 +64,16 @@ impl State {
     pub fn is_final(self) -> bool {
         matches!(self, State::Ended | State::Stopped | State::Failed)
     }
+
+    /// A track is opening, playing or paused: a foreground service has a reason to run.
+    pub fn is_active(self) -> bool {
+        matches!(self, State::Opening | State::Playing | State::Paused)
+    }
+}
+
+/// The form Java sees: low 8 bits the state, bits 8..15 the error kind (0 = none).
+pub fn pack_state(state: State, error: Option<ErrorKind>) -> i32 {
+    (state as i32) | (error.map_or(0, |kind| kind as i32) << 8)
 }
 
 struct Control {
@@ -71,6 +86,7 @@ struct Control {
 struct Shared {
     ctl: Mutex<Control>,
     cv: Condvar,
+    observer: Option<Observer>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -78,7 +94,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    fn new() -> Shared {
+    fn new(observer: Option<Observer>) -> Shared {
         Shared {
             ctl: Mutex::new(Control {
                 pause: false,
@@ -87,6 +103,7 @@ impl Shared {
                 error: None,
             }),
             cv: Condvar::new(),
+            observer,
         }
     }
 
@@ -109,18 +126,36 @@ impl Shared {
     }
 
     fn set_state(&self, state: State) {
-        let mut c = lock(&self.ctl);
-        if !c.state.is_final() {
-            c.state = state;
+        let changed = {
+            let mut c = lock(&self.ctl);
+            let changed = !c.state.is_final() && c.state != state;
+            if !c.state.is_final() {
+                c.state = state;
+            }
+            self.cv.notify_all();
+            changed
+        };
+        if changed {
+            self.notify(state, None);
         }
-        self.cv.notify_all();
     }
 
     fn finish(&self, state: State, error: Option<ErrorKind>) {
-        let mut c = lock(&self.ctl);
-        c.state = state;
-        c.error = error;
-        self.cv.notify_all();
+        {
+            let mut c = lock(&self.ctl);
+            c.state = state;
+            c.error = error;
+            self.cv.notify_all();
+        }
+        self.notify(state, error);
+    }
+
+    /// The state is already visible to `Engine::state` when the observer runs, so a service
+    /// that starts late can still read it. A panicking observer must not disturb playback.
+    fn notify(&self, state: State, error: Option<ErrorKind>) {
+        if let Some(observer) = &self.observer {
+            let _ = catch_unwind(AssertUnwindSafe(|| (**observer)(state, error)));
+        }
     }
 
     /// Sleeps until playback is resumed or stopped. No polling.
@@ -149,11 +184,22 @@ pub struct Engine {
     /// Serialises `play` and `shutdown` (they join threads).
     serial: Mutex<()>,
     session: Mutex<Option<Session>>,
+    observer: Mutex<Option<Observer>>,
 }
 
 impl Engine {
     pub fn new(factory: SinkFactory) -> Engine {
-        Engine { factory, serial: Mutex::new(()), session: Mutex::new(None) }
+        Engine {
+            factory,
+            serial: Mutex::new(()),
+            session: Mutex::new(None),
+            observer: Mutex::new(None),
+        }
+    }
+
+    /// Registers the observer used by tracks started after this call.
+    pub fn set_observer(&self, observer: Observer) {
+        *lock(&self.observer) = Some(observer);
     }
 
     /// Starts playing `file`, replacing whatever is playing. Takes ownership of the file:
@@ -164,7 +210,8 @@ impl Engine {
         if let Some(previous) = previous {
             previous.stop_and_join();
         }
-        let shared = Arc::new(Shared::new());
+        let observer = lock(&self.observer).clone();
+        let shared = Arc::new(Shared::new(observer));
         let thread_shared = Arc::clone(&shared);
         let factory = Arc::clone(&self.factory);
         let handle = thread::Builder::new()
@@ -643,6 +690,97 @@ mod tests {
         assert_eq!(wait_final(&healthy, 20), (State::Ended, None));
         healthy.shutdown();
         e.shutdown();
+    }
+
+    type Events = Arc<Mutex<Vec<(State, Option<ErrorKind>)>>>;
+
+    fn observe(e: &Engine) -> Events {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        e.set_observer(Arc::new(move |state, error| lock(&sink).push((state, error))));
+        events
+    }
+
+    #[test]
+    fn observer_sees_playing_then_ended_exactly_once() {
+        let _g = lock_fd();
+        let rec = Arc::new(Mutex::new(Rec::default()));
+        let e = engine(&rec, Cfg::default());
+        let events = observe(&e);
+        e.play(open_temp(&wav_bytes(44_100, 2, 44_100))).expect("play");
+        assert_eq!(wait_final(&e, 20), (State::Ended, None));
+        e.shutdown(); // joins the playback thread: the observer has finished by now
+        assert_eq!(*lock(&events), vec![(State::Playing, None), (State::Ended, None)]);
+    }
+
+    #[test]
+    fn observer_sees_pause_resume_and_stop() {
+        let _g = lock_fd();
+        let rec = Arc::new(Mutex::new(Rec::default()));
+        let e = engine(&rec, Cfg { delay_ms: 20, ..Cfg::default() });
+        let events = observe(&e);
+        e.play(open_temp(&wav_bytes(44_100, 2, 441_000))).expect("play");
+        wait_until(5, || lock(&rec).frames > 0);
+        e.pause();
+        wait_until(5, || e.state().0 == State::Paused);
+        e.resume();
+        wait_until(5, || e.state().0 == State::Playing);
+        e.stop();
+        assert_eq!(wait_final(&e, 10), (State::Stopped, None));
+        e.shutdown();
+        assert_eq!(
+            *lock(&events),
+            vec![
+                (State::Playing, None),
+                (State::Paused, None),
+                (State::Playing, None),
+                (State::Stopped, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn observer_sees_a_failure_once_and_never_playing() {
+        let _g = lock_fd();
+        let rec = Arc::new(Mutex::new(Rec::default()));
+        let e = engine(&rec, Cfg::default());
+        let events = observe(&e);
+        e.play(open_temp(&b"This is not an audio file.\n".repeat(2000))).expect("play");
+        let (state, error) = wait_final(&e, 20);
+        assert_eq!(state, State::Failed);
+        e.shutdown();
+        let seen = lock(&events);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], (State::Failed, error));
+    }
+
+    #[test]
+    fn a_panicking_observer_does_not_disturb_playback() {
+        let _g = lock_fd();
+        let rec = Arc::new(Mutex::new(Rec::default()));
+        let e = engine(&rec, Cfg::default());
+        e.set_observer(Arc::new(|_, _| panic!("deliberate test panic in the observer")));
+        let file = open_temp(&wav_bytes(44_100, 2, 4_410));
+        let raw = file.as_raw_fd();
+        e.play(file).expect("play");
+        assert_eq!(wait_final(&e, 20), (State::Ended, None));
+        e.shutdown();
+        assert!(!is_open(raw));
+    }
+
+    #[test]
+    fn only_a_live_track_counts_as_active() {
+        assert!(State::Opening.is_active() && State::Playing.is_active() && State::Paused.is_active());
+        for state in [State::Idle, State::Ended, State::Stopped, State::Failed] {
+            assert!(!state.is_active(), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn packed_state_matches_the_java_contract() {
+        assert_eq!(pack_state(State::Idle, None), 0);
+        assert_eq!(pack_state(State::Playing, None), 2);
+        assert_eq!(pack_state(State::Failed, Some(ErrorKind::Corrupt)), 6 | (6 << 8));
     }
 
     /// Runs only when `BW_FIXTURES` points at real MP3/FLAC/OGG/WAV files (see decoder tests).

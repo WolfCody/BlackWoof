@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Stage 2 test build. Deliberately no <uses-permission>: the app needs none, and
-     INTERNET must never appear. minSdk/targetSdk/version are passed to aapt2 by
-     scripts/build_apk.sh. -->
+<!-- Exactly two permissions, both for the foreground service that keeps playback alive.
+     Never INTERNET, never anything else: scripts/verify_apk.sh enforces this exact set.
+     minSdk/targetSdk/version are passed to aapt2 by scripts/build_apk.sh. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dzekiwolf.blackwoof">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
         android:label="BLACK WOOF"
@@ -19,5 +22,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".PlayerService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 </manifest>

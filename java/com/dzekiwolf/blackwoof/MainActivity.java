@@ -96,14 +96,6 @@ public final class MainActivity extends Activity {
         refresh();
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (isFinishing() && Native.LOADED) {
-            Native.nativeShutdown();
-        }
-    }
-
     private void pickFile() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -143,7 +135,23 @@ public final class MainActivity extends Activity {
         int fd = pfd.detachFd();
         int code = Native.nativePlay(fd);
         note = code == 0 ? "" : errorText(code);
+        if (code == 0) {
+            startPlaybackService();
+        }
         refresh();
+    }
+
+    /**
+     * Starts the foreground service from this user action while the Activity is visible (the
+     * Android 15/17 rule). The service ends itself when Rust reports the end of playback, and
+     * leaving this screen does not stop the music.
+     */
+    private void startPlaybackService() {
+        try {
+            startForegroundService(new Intent(this, PlayerService.class));
+        } catch (RuntimeException e) {
+            note = "Background service could not start";
+        }
     }
 
     private void refresh() {
