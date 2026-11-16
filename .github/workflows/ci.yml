@@ -115,7 +115,8 @@ jobs:
           echo "== log feature graph (for inspection)"
           cargo tree --target aarch64-linux-android -e features -i log ${LOCKED:?LOCKED is not set} | tee build/log-features.txt
           echo "== log facade policy (strict: one version, max_level_off enabled)"
-          cargo metadata --format-version 1 --filter-platform aarch64-linux-android ${LOCKED:?LOCKED is not set} | python3 scripts/check_log_facade.py | tee build/log-policy.txt
+          cargo build -p xtask --release
+          cargo metadata --format-version 1 --filter-platform aarch64-linux-android ${LOCKED:?LOCKED is not set} | ./target/release/xtask check-log-facade | tee build/log-policy.txt
 
       - name: Summary
         if: always()
