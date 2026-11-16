@@ -237,10 +237,10 @@ fn int_call<F: FnOnce() -> i32>(f: F) -> i32 {
     silence_panics();
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(0)
 }
-
-fn read_string(env: &JNIEnv, value: &JString) -> Option<String> {
+fn read_string(env: &mut JNIEnv, value: &JString) -> Option<String> {
     env.get_string(value).ok().map(|s| s.into())
 }
+
 
 fn make_string(env: &JNIEnv, text: String) -> jstring {
     env.new_string(text).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
