@@ -262,7 +262,7 @@ pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeInit<'local>(
     dir: JString<'local>,
 ) -> i32 {
     int_call(|| {
-        if let Some(path) = read_string(&env, &dir) {
+        if let Some(path) = read_string(&mut env, &dir) {
             controller().init(&path);
         }
         0
@@ -352,7 +352,7 @@ pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeOpenExternal<'l
     _class: JClass<'local>,
     uri: JString<'local>,
 ) -> i32 {
-    int_call(|| match read_string(&env, &uri) {
+    int_call(|| match read_string(&mut env, &uri) {
         Some(uri) => controller().open_external(&uri),
         None => 0,
     })
