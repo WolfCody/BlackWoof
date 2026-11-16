@@ -257,7 +257,7 @@ pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeApiVersion(
 /// Once per process, with the app's private files directory (where the last playback lives).
 #[no_mangle]
 pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeInit<'local>(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     dir: JString<'local>,
 ) -> i32 {
@@ -282,7 +282,7 @@ pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeClick(
 /// The whole screen as lines (see `ui.rs`). Null only if a panic was caught.
 #[no_mangle]
 pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeScreen<'local>(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
     silence_panics();
