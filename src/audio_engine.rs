@@ -9,6 +9,7 @@
 
 use std::fs::File;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -87,6 +88,15 @@ struct Shared {
     ctl: Mutex<Control>,
     cv: Condvar,
     observer: Option<Observer>,
+    /// Set when this track is being replaced: its last state must not reach the observer.
+    silenced: AtomicBool,
+    /// Volume factor as f32 bits (shared by all tracks of the engine; 1.0 = unchanged).
+    gain: Arc<AtomicU32>,
+    /// Frames handed to the audio output so far, and the stream's sample rate.
+    frames: AtomicU64,
+    rate: AtomicU32,
+    /// Where in the track this playback started (restoring a saved position).
+    base_ms: u64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -94,7 +104,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    fn new(observer: Option<Observer>) -> Shared {
+    fn new(observer: Option<Observer>, gain: Arc<AtomicU32>, base_ms: u64) -> Shared {
         Shared {
             ctl: Mutex::new(Control {
                 pause: false,
@@ -104,6 +114,11 @@ impl Shared {
             }),
             cv: Condvar::new(),
             observer,
+            silenced: AtomicBool::new(false),
+            gain,
+            frames: AtomicU64::new(0),
+            rate: AtomicU32::new(0),
+            base_ms,
         }
     }
 
@@ -153,9 +168,34 @@ impl Shared {
     /// The state is already visible to `Engine::state` when the observer runs, so a service
     /// that starts late can still read it. A panicking observer must not disturb playback.
     fn notify(&self, state: State, error: Option<ErrorKind>) {
+        if self.silenced.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(observer) = &self.observer {
             let _ = catch_unwind(AssertUnwindSafe(|| (**observer)(state, error)));
         }
+    }
+
+    fn silence(&self) {
+        self.silenced.store(true, Ordering::SeqCst);
+    }
+
+    fn set_rate(&self, rate: u32) {
+        self.rate.store(rate, Ordering::Relaxed);
+    }
+
+    fn add_frames(&self, frames: u64) {
+        self.frames.fetch_add(frames, Ordering::Relaxed);
+    }
+
+    /// Position in the track: where playback started plus what was handed to the output.
+    /// It runs ahead of the speaker by the output buffer (a fraction of a second).
+    fn position_ms(&self) -> u64 {
+        let rate = u64::from(self.rate.load(Ordering::Relaxed));
+        if rate == 0 {
+            return self.base_ms;
+        }
+        self.base_ms + self.frames.load(Ordering::Relaxed) * 1000 / rate
     }
 
     /// Sleeps until playback is resumed or stopped. No polling.
@@ -185,6 +225,7 @@ pub struct Engine {
     serial: Mutex<()>,
     session: Mutex<Option<Session>>,
     observer: Mutex<Option<Observer>>,
+    gain: Arc<AtomicU32>,
 }
 
 impl Engine {
@@ -194,6 +235,7 @@ impl Engine {
             serial: Mutex::new(()),
             session: Mutex::new(None),
             observer: Mutex::new(None),
+            gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
         }
     }
 
@@ -202,21 +244,42 @@ impl Engine {
         *lock(&self.observer) = Some(observer);
     }
 
+    /// Volume factor for everything played from now on (1.0 = unchanged). Used for ducking.
+    pub fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Position in the current track in milliseconds (0 if nothing was played yet).
+    pub fn position_ms(&self) -> u64 {
+        match lock(&self.session).as_ref() {
+            Some(s) => s.shared.position_ms(),
+            None => 0,
+        }
+    }
+
     /// Starts playing `file`, replacing whatever is playing. Takes ownership of the file:
     /// it is closed on every path (success, error, replaced, stopped, panic).
     pub fn play(&self, file: File) -> Result<(), Error> {
+        self.play_at(file, 0)
+    }
+
+    /// Like `play`, but starts `start_ms` milliseconds into the track (restoring a position).
+    pub fn play_at(&self, file: File, start_ms: u64) -> Result<(), Error> {
         let _serial = lock(&self.serial);
         let previous = lock(&self.session).take();
         if let Some(previous) = previous {
+            // The replaced track's last state must not reach the observer: it would end the
+            // service or advance the queue while the new track is starting.
+            previous.shared.silence();
             previous.stop_and_join();
         }
         let observer = lock(&self.observer).clone();
-        let shared = Arc::new(Shared::new(observer));
+        let shared = Arc::new(Shared::new(observer, Arc::clone(&self.gain), start_ms));
         let thread_shared = Arc::clone(&shared);
         let factory = Arc::clone(&self.factory);
         let handle = thread::Builder::new()
             .name("bw-audio".to_string())
-            .spawn(move || thread_main(thread_shared, file, factory))
+            .spawn(move || thread_main(thread_shared, file, factory, start_ms))
             .map_err(|_| Error::new(ErrorKind::Internal))?;
         *lock(&self.session) = Some(Session { shared, handle });
         Ok(())
@@ -264,18 +327,23 @@ impl Engine {
     }
 }
 
-fn thread_main(shared: Arc<Shared>, file: File, factory: SinkFactory) {
-    let outcome = catch_unwind(AssertUnwindSafe(|| run(&shared, file, &*factory)));
+fn thread_main(shared: Arc<Shared>, file: File, factory: SinkFactory, start_ms: u64) {
+    let outcome = catch_unwind(AssertUnwindSafe(|| run(&shared, file, &*factory, start_ms)));
     if outcome.is_err() {
         // The unwind has already dropped the decoder (file) and the sink.
         shared.finish(State::Failed, Some(ErrorKind::Internal));
     }
 }
 
-fn run(shared: &Shared, file: File, factory: &(dyn Fn() -> Box<dyn Sink> + Send + Sync)) {
+fn run(
+    shared: &Shared,
+    file: File,
+    factory: &(dyn Fn() -> Box<dyn Sink> + Send + Sync),
+    start_ms: u64,
+) {
     // `play_track` owns the file and the sink; both are gone when it returns,
     // so the final state is published only after the descriptor is closed.
-    let (state, error) = match play_track(shared, file, factory) {
+    let (state, error) = match play_track(shared, file, factory, start_ms) {
         Ok(state) => (state, None),
         Err(e) => (State::Failed, Some(e.kind)),
     };
@@ -300,12 +368,18 @@ fn play_track(
     shared: &Shared,
     file: File,
     factory: &(dyn Fn() -> Box<dyn Sink> + Send + Sync),
+    start_ms: u64,
 ) -> Result<State, Error> {
     let mut dec = Decoder::open(file)?;
     if shared.flags().0 {
         return Ok(State::Stopped);
     }
     let info = dec.info();
+    shared.set_rate(info.sample_rate);
+    if start_ms > 0 {
+        // Restoring a saved position: a failure only means starting from where we are.
+        let _ = dec.skip_frames(start_ms * u64::from(info.sample_rate) / 1000);
+    }
     let mut sink = factory();
     sink.open(info)?;
     let mut buf: Vec<i16> = Vec::with_capacity((CHUNK_FRAMES + 2048) * info.channels as usize);
@@ -331,6 +405,12 @@ fn pump(
     loop {
         buf.clear();
         let read = dec.read(buf, CHUNK_FRAMES);
+        let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
+        if gain < 0.999 {
+            for sample in buf.iter_mut() {
+                *sample = (f32::from(*sample) * gain) as i16;
+            }
+        }
         // Play what was decoded even if the read then ended or failed.
         if !buf.is_empty() && write_all(shared, sink, buf, info, pb)? == Flow::Stop {
             return Ok(State::Stopped);
@@ -411,6 +491,7 @@ fn write_all(
             Ok(frames) => {
                 offset = (offset + frames * channels).min(samples.len());
                 idle = 0;
+                shared.add_frames(frames as u64);
             }
             Err(_) => reopen(sink, info, pb, ErrorKind::OutputWrite)?,
         }

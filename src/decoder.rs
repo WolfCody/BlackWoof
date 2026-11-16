@@ -140,6 +140,36 @@ impl Decoder {
         Ok(true)
     }
 
+    /// Discards about `frames` frames from the current position (restoring a saved position
+    /// by decoding forward: no seek API is involved, so a damaged index cannot break it).
+    pub fn skip_frames(&mut self, frames: u64) -> Result<(), Error> {
+        let mut left = frames.saturating_mul(u64::from(self.info.channels)) as usize;
+        if self.scratch_ready {
+            if self.scratch.len() <= left {
+                left -= self.scratch.len();
+                self.scratch_ready = false;
+            } else {
+                self.scratch.drain(..left);
+                left = 0;
+            }
+        }
+        while left > 0 && !self.ended {
+            match self.step()? {
+                Step::Samples => {
+                    if self.scratch.len() <= left {
+                        left -= self.scratch.len();
+                    } else {
+                        self.scratch.drain(..left);
+                        self.scratch_ready = true;
+                        left = 0;
+                    }
+                }
+                Step::End => self.ended = true,
+            }
+        }
+        Ok(())
+    }
+
     /// Decodes the next packet of the chosen track into `scratch`.
     fn step(&mut self) -> Result<Step, Error> {
         let mut failures: u32 = 0;

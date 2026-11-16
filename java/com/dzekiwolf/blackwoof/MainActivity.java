@@ -1,415 +1,294 @@
 package com.dzekiwolf.blackwoof;
 
-import android.Manifest;
 import android.app.Activity;
-import android.content.ContentUris;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.provider.MediaStore;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
+import android.widget.BaseAdapter;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
-import java.util.ArrayList;
-
 /**
- * BLACK WOOF minimal text UI and Stage 3.1 local Tracks library.
- * MediaStore is queried only after the user opens/rescans the library.
+ * A thin renderer. Rust composes the whole text screen (src/ui.rs) and decides what every
+ * press means; this class draws the lines it is given, forwards presses, and runs the few
+ * things only an Activity can do (permission dialog, starting the service).
+ *
+ * Black window, plain text, no animation, no timer: the screen is redrawn only when Rust says
+ * something changed (onUiChanged) and when the Activity comes back to the front.
  */
 public final class MainActivity extends Activity {
-    private static final int REQUEST_PICK = 1;
-    private static final int REQUEST_AUDIO_PERMISSION = 2;
+    private static final int REQUEST_AUDIO = 1;
     private static final int GRAY = 0xFFB0B0B0;
-    private static final int WHITE = 0xFFE0E0E0;
+    private static final int RED = 0xFFFF3B30;
 
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final ArrayList<Track> tracks = new ArrayList<>();
-    private LinearLayout root;
-    private TextView stateView;
-    private TextView libraryStatus;
-    private ListView trackList;
-    private String note = "";
-    private String currentTitle = "";
-    private String currentArtist = "";
-    private boolean showingLibrary;
-    private boolean scanInProgress;
+    private static volatile MainActivity current;
 
-    private static final class Track {
-        final long id;
-        final String title;
-        final String artist;
-        final String album;
-        final long duration;
+    private LinearLayout host;
+    private ListView list;
+    private boolean onLibrary;
 
-        Track(long id, String title, String artist, String album, long duration) {
-            this.id = id;
-            this.title = title;
-            this.artist = artist;
-            this.album = album;
-            this.duration = duration;
-        }
-
-        Uri uri() {
-            return ContentUris.withAppendedId(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id);
-        }
-
-        String displayText() {
-            String by = artist == null || artist.isEmpty() ? "Unknown artist" : artist;
-            return title + "\n" + by;
+    /** Called from Rust (through JNI) when what the screen shows has changed. */
+    static void onUiChanged() {
+        final MainActivity activity = current;
+        if (activity != null) {
+            activity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    activity.render();
+                }
+            });
         }
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        showPlayer();
+        Platform.init(this);
+        if (Native.LOADED) {
+            Native.nativeInit(getFilesDir().getAbsolutePath());
+        }
+
+        LinearLayout outer = new LinearLayout(this);
+        outer.setBackgroundColor(Color.BLACK);
+        outer.setFitsSystemWindows(true);
+        host = new LinearLayout(this);
+        host.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        host.setPadding(pad, pad, pad, pad);
+        outer.addView(host, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(outer);
+
+        if (savedInstanceState == null) {
+            handleIntent(getIntent());
+        }
+        render();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (!showingLibrary) refreshPlayer();
-    }
-    private void showPlayer() {
-        showingLibrary = false;
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.BLACK);
-        root.setPadding(dp(16), dp(16), dp(16), dp(16));
-
-        root.addView(label("BLACK WOOF"));
-        root.addView(label("------------------------"));
-        stateView = label("");
-        root.addView(stateView);
-        root.addView(label(""));
-        root.addView(button("[ LIBRARY ]", new View.OnClickListener() {
-            @Override public void onClick(View v) { openLibrary(); }
-        }));
-        root.addView(button("[ OPEN ]", new View.OnClickListener() {
-            @Override public void onClick(View v) { pickFile(); }
-        }));
-        root.addView(button("[ PAUSE ]", new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (Native.LOADED) Native.nativePause();
-                refreshPlayer();
-            }
-        }));
-        root.addView(button("[ RESUME ]", new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (Native.LOADED) Native.nativeResume();
-                refreshPlayer();
-            }
-        }));
-        root.addView(button("[ STOP ]", new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (Native.LOADED) Native.nativeStop();
-                refreshPlayer();
-            }
-        }));
-        root.addView(button("[ STATUS ]", new View.OnClickListener() {
-            @Override public void onClick(View v) { refreshPlayer(); }
-        }));
-        setContentView(root);
-        refreshPlayer();
-    }
-
-    private void showLibrary(String status) {
-        showingLibrary = true;
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.BLACK);
-        root.setPadding(dp(16), dp(16), dp(16), dp(8));
-        root.addView(label("BLACK WOOF / LIBRARY"));
-        root.addView(label("------------------------"));
-        root.addView(button("[ BACK ]", new View.OnClickListener() {
-            @Override public void onClick(View v) { showPlayer(); }
-        }));
-        root.addView(button("[ RESCAN ]", new View.OnClickListener() {
-            @Override public void onClick(View v) { requestLibraryAccessAndScan(); }
-        }));
-        libraryStatus = label(status);
-        root.addView(libraryStatus);
-        trackList = new ListView(this);
-        trackList.setBackgroundColor(Color.BLACK);
-        trackList.setDivider(null);
-        trackList.setCacheColorHint(Color.BLACK);
-        trackList.setOnItemClickListener(new AdapterView.OnItemClickListener() {
-            @Override
-            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                if (position >= 0 && position < tracks.size()) {
-                    Track selected = tracks.get(position);
-                    play(selected.uri(), selected.title, selected.artist);
-                    showPlayer();
-                }
-            }
-        });
-        root.addView(trackList, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f));
-        setContentView(root);
-        if (tracks.isEmpty() && status == null) requestLibraryAccessAndScan();
-        else bindTracks();
-    }
-
-    private void openLibrary() {
-        showLibrary("Requesting music access...");
-        requestLibraryAccessAndScan();
-    }
-
-    private String audioPermission() {
-        return Build.VERSION.SDK_INT >= 33
-                ? Manifest.permission.READ_MEDIA_AUDIO
-                : Manifest.permission.READ_EXTERNAL_STORAGE;
-    }
-
-    private boolean hasAudioPermission() {
-        return Build.VERSION.SDK_INT < 23
-                || checkSelfPermission(audioPermission()) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private void requestLibraryAccessAndScan() {
-        if (!hasAudioPermission()) {
-            requestPermissions(new String[]{audioPermission()}, REQUEST_AUDIO_PERMISSION);
-            return;
-        }
-        scanLibrary();
+        current = this;
+        render();
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(requestCode, permissions, results);
-        if (requestCode == REQUEST_AUDIO_PERMISSION) {
-            if (hasAudioPermission()) scanLibrary();
-            else if (libraryStatus != null) {
-                libraryStatus.setText("Music access denied. Use OPEN to choose a file.");
-            }
+    protected void onPause() {
+        if (current == this) {
+            current = null;
         }
-    }
-
-    /** One bounded MediaStore query on a temporary worker, started only by user action. */
-    private void scanLibrary() {
-        if (!showingLibrary || scanInProgress) return;
-        scanInProgress = true;
-        if (libraryStatus != null) libraryStatus.setText("Scanning...");
-        Thread worker = new Thread(new Runnable() {
-            @Override public void run() {
-                ArrayList<Track> found = new ArrayList<>();
-                String error = null;
-                String[] projection = {
-                        MediaStore.Audio.Media._ID,
-                        MediaStore.Audio.Media.TITLE,
-                        MediaStore.Audio.Media.ARTIST,
-                        MediaStore.Audio.Media.ALBUM,
-                        MediaStore.Audio.Media.DURATION
-                };
-                String selection = MediaStore.Audio.Media.IS_MUSIC + " != 0";
-                String sort = MediaStore.Audio.Media.TITLE + " COLLATE NOCASE ASC";
-                Uri collection = Build.VERSION.SDK_INT >= 29
-                        ? MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-                        : MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
-                try (Cursor cursor = getContentResolver().query(
-                        collection, projection, selection, null, sort)) {
-                    if (cursor != null) {
-                        int idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
-                        int titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE);
-                        int artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST);
-                        int albumCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM);
-                        int durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION);
-                        while (cursor.moveToNext()) {
-                            long id = cursor.getLong(idCol);
-                            String title = cursor.getString(titleCol);
-                            if (title == null || title.trim().isEmpty()) title = "Unknown title";
-                            found.add(new Track(id, title, cursor.getString(artistCol),
-                                    cursor.getString(albumCol), cursor.getLong(durationCol)));
-                        }
-                    }
-                } catch (SecurityException e) {
-                    error = "Music access denied";
-                } catch (Exception e) {
-                    error = "Library scan failed";
-                }
-                final ArrayList<Track> result = found;
-                final String failure = error;
-                mainHandler.post(new Runnable() {
-                    @Override public void run() {
-                        scanInProgress = false;
-                        if (!showingLibrary || isFinishing()) return;
-                        tracks.clear();
-                        tracks.addAll(result);
-                        if (failure != null) libraryStatus.setText(failure);
-                        else if (tracks.isEmpty()) libraryStatus.setText("No tracks found");
-                        else libraryStatus.setText("Tracks: " + tracks.size());
-                        bindTracks();
-                    }
-                });
-            }
-        }, "blackwoof-library-query");
-        worker.start();
-    }
-
-    private void bindTracks() {
-        if (trackList == null) return;
-        ArrayAdapter<Track> adapter = new ArrayAdapter<Track>(
-                this, android.R.layout.simple_list_item_1, tracks) {
-            @Override public View getView(int position, View convertView, ViewGroup parent) {
-                TextView row = (TextView) super.getView(position, convertView, parent);
-                row.setText(tracks.get(position).displayText());
-                row.setTextColor(WHITE);
-                row.setTypeface(Typeface.MONOSPACE);
-                row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-                row.setPadding(dp(4), dp(10), dp(4), dp(10));
-                row.setMinHeight(dp(52));
-                row.setBackgroundColor(Color.BLACK);
-                return row;
-            }
-        };
-        trackList.setAdapter(adapter);
-    }
-
-    private void pickFile() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("audio/*");
-        startActivityForResult(intent, REQUEST_PICK);
+        super.onPause();
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_PICK && resultCode == RESULT_OK
-                && data != null && data.getData() != null) play(data.getData(), "", "");
+    public void onBackPressed() {
+        if (onLibrary && Native.LOADED) {
+            apply(Native.nativeClick(Native.ID_BACK));
+        } else {
+            super.onBackPressed();
+        }
     }
 
-    private void play(Uri uri, String title, String artist) {
-        if (!Native.LOADED || Native.nativeApiVersion() != Native.API_VERSION) {
-            note = "Audio engine is not loaded";
-            refreshPlayer();
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_AUDIO && Native.LOADED) {
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            Native.nativePermissionResult(granted ? 1 : 0);
+        }
+    }
+
+    /** Android opened an audio file with BLACK WOOF: hand the URI to Rust, never to another app. */
+    private void handleIntent(Intent intent) {
+        if (intent == null || !Native.LOADED || !Intent.ACTION_VIEW.equals(intent.getAction())) {
             return;
         }
-        ParcelFileDescriptor pfd = null;
+        Uri uri = intent.getData();
+        if (uri == null || !"content".equals(uri.getScheme())) {
+            return;
+        }
         try {
-            pfd = getContentResolver().openFileDescriptor(uri, "r");
-        } catch (Exception ignored) {
-            // The URI may have been removed or its provider may be unavailable.
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception e) {
+            // Not every provider offers a lasting grant; the file may then not reopen later.
         }
-        if (pfd == null) {
-            note = "File cannot be opened";
-            refreshPlayer();
-            return;
+        apply(Native.nativeOpenExternal(uri.toString()));
+    }
+
+    private void click(int id) {
+        if (Native.LOADED) {
+            apply(Native.nativeClick(id));
         }
-        // Ownership transfers to Rust at nativePlay entry; Java must not close this FD.
-        int fd;
-        try {
-            fd = pfd.detachFd();
-        } catch (RuntimeException e) {
-            try { pfd.close(); } catch (Exception ignored) { }
-            note = "File descriptor unavailable";
-            refreshPlayer();
-            return;
-        }
-        int code = Native.nativePlay(fd);
-        note = code == 0 ? "" : errorText(code);
-        if (code == 0) {
-            currentTitle = title == null ? "" : title;
-            currentArtist = artist == null ? "" : artist;
+    }
+
+    /** Things only an Activity can do, as Rust asked. */
+    private void apply(int effects) {
+        if ((effects & Native.EFFECT_START_SERVICE) != 0) {
             startPlaybackService();
         }
-        refreshPlayer();
+        if ((effects & Native.EFFECT_REQUEST_PERMISSION) != 0) {
+            requestPermissions(new String[] { Platform.audioPermission() }, REQUEST_AUDIO);
+        }
     }
 
+    /**
+     * Starts the foreground service from a user action while this Activity is visible (the
+     * Android 15/17 rule). The service ends itself when Rust says playback is over, and leaving
+     * this screen does not stop the music.
+     */
     private void startPlaybackService() {
         try {
             startForegroundService(new Intent(this, PlayerService.class));
         } catch (RuntimeException e) {
-            note = "Background service could not start";
+            // Playback continues without the service; Android may limit it in the background.
         }
     }
 
-    private void refreshPlayer() {
-        if (stateView == null || showingLibrary) return;
-        StringBuilder text = new StringBuilder();
-        if (!Native.LOADED) text.append("Engine: not loaded");
-        else {
-            int packed = Native.nativeState();
-            if (packed < 0) text.append("State: ?");
-            else {
-                text.append("State: ").append(stateName(packed & 0xFF));
-                int error = (packed >> 8) & 0xFF;
-                if (error != 0) text.append("\nError: ").append(errorText(error));
+    private void render() {
+        String screen = Native.LOADED ? Native.nativeScreen() : null;
+        if (screen == null) {
+            screen = "S|gray\nT|BLACK WOOF\nT|Audio engine is not loaded";
+        }
+        int first = 0;
+        int top = 0;
+        if (list != null) {
+            first = list.getFirstVisiblePosition();
+            View row = list.getChildAt(0);
+            top = row == null ? 0 : row.getTop();
+        }
+        host.removeAllViews();
+        list = null;
+
+        String[] lines = screen.split("\n");
+        int color = GRAY;
+        onLibrary = false;
+        for (String line : lines) {
+            if (line.startsWith("S|")) {
+                color = line.endsWith("red") ? RED : GRAY;
+            } else if (line.startsWith("K|")) {
+                onLibrary = line.endsWith("library");
             }
         }
-        if (!currentTitle.isEmpty()) {
-            text.append("\nTrack: ").append(currentTitle);
-            if (!currentArtist.isEmpty()) text.append("\nArtist: ").append(currentArtist);
-        }
-        if (!note.isEmpty()) text.append("\n").append(note);
-        stateView.setText(text.toString());
-    }
-
-    private static String stateName(int state) {
-        switch (state) {
-            case 0: return "IDLE";
-            case 1: return "OPENING";
-            case 2: return "PLAYING";
-            case 3: return "PAUSED";
-            case 4: return "ENDED";
-            case 5: return "STOPPED";
-            case 6: return "FAILED";
-            default: return "?";
-        }
-    }
-
-    /** Codes match ErrorKind in src/error.rs. */
-    private static String errorText(int code) {
-        switch (code) {
-            case 1: return "Bad file handle";
-            case 2: return "File cannot be read";
-            case 3: return "Unknown audio format";
-            case 4: return "No audio in file";
-            case 5: return "Unsupported audio parameters";
-            case 6: return "File is damaged";
-            case 7: return "Audio output unavailable";
-            case 8: return "Audio output refused to start";
-            case 9: return "Audio output failed";
-            case 10: return "Internal error";
-            default: return "Error " + code;
+        for (String line : lines) {
+            if (line.startsWith("T|")) {
+                host.addView(label(line.substring(2), color));
+            } else if (line.startsWith("B|")) {
+                String[] parts = line.split("\\|", 3);
+                if (parts.length == 3) {
+                    host.addView(button(parts[2], id(parts[1]), color));
+                }
+            } else if (line.startsWith("H|")) {
+                String[] parts = line.split("\\|");
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                for (int i = 1; i + 1 < parts.length; i += 2) {
+                    row.addView(button(parts[i + 1], id(parts[i]), color),
+                            new LinearLayout.LayoutParams(
+                                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                }
+                host.addView(row);
+            } else if (line.startsWith("LIST|")) {
+                list = new ListView(this);
+                list.setDivider(null);
+                list.setAdapter(new Rows(color));
+                list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+                    @Override
+                    public void onItemClick(AdapterView<?> parent, View view, int position, long rowId) {
+                        click(Native.ID_ITEM_BASE + position);
+                    }
+                });
+                host.addView(list, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+                list.setSelectionFromTop(first, top);
+            }
         }
     }
 
-    private TextView label(String text) {
+    private static int id(String text) {
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    private TextView label(String text, int color) {
         TextView view = new TextView(this);
         view.setText(text);
-        view.setTextColor(GRAY);
+        view.setTextColor(color);
         view.setTypeface(Typeface.MONOSPACE);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         return view;
     }
 
-    private TextView button(String text, View.OnClickListener onClick) {
-        TextView view = label(text);
+    private TextView button(String text, final int id, int color) {
+        TextView view = label(text, color);
         view.setMinHeight(dp(48));
         view.setGravity(Gravity.CENTER_VERTICAL);
         view.setClickable(true);
-        view.setOnClickListener(onClick);
+        view.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                click(id);
+            }
+        });
         return view;
     }
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    /** Rows of the music list: the text of row i is asked from Rust when the row is drawn. */
+    private final class Rows extends BaseAdapter {
+        private final int color;
+
+        Rows(int color) {
+            this.color = color;
+        }
+
+        @Override
+        public int getCount() {
+            return Native.LOADED ? Native.nativeItemCount() : 0;
+        }
+
+        @Override
+        public Object getItem(int position) {
+            return null;
+        }
+
+        @Override
+        public long getItemId(int position) {
+            return position;
+        }
+
+        @Override
+        public View getView(int position, View convertView, ViewGroup parent) {
+            TextView view = convertView instanceof TextView
+                    ? (TextView) convertView : label("", color);
+            view.setMinHeight(dp(40));
+            view.setGravity(Gravity.CENTER_VERTICAL);
+            String text = Native.LOADED ? Native.nativeItem(position) : "";
+            view.setText(text == null ? "" : text);
+            view.setTextColor(color);
+            return view;
+        }
     }
 }

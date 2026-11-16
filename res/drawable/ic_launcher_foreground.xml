@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The wolf sits inside the 66 dp safe zone of the 108 dp adaptive-icon layer. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_wolf"
+    android:inset="19%" />

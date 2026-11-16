@@ -7,55 +7,148 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
+import android.media.MediaMetadata;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 
+import java.util.Arrays;
+
 /**
- * Minimal platform glue. Android requires a Service subclass and a notification for a
- * foreground service; nothing else lives here. Rust owns the playback state and the decision
- * when the service should end: it calls onEngineState (via JNI, see android_bridge.rs) when a
- * track reaches a final state, and nativeIsActive tells a freshly started service whether
- * there is anything to keep alive.
+ * Platform glue for background playback: the foreground service, the MediaSession, the media
+ * notification and the audio focus request. Rust owns the state and every decision. This class
+ * applies the picture Rust sends (show) and forwards what Android reports (focus changes,
+ * media buttons, notification buttons) straight to Rust.
  *
  * The Activity starts this service from a user action while it is visible (the Android 15/17
  * rule). START_NOT_STICKY: after the process dies nothing restarts, so nothing plays by itself.
  */
 public final class PlayerService extends Service {
-    static final String ACTION_STOP = "com.dzekiwolf.blackwoof.action.STOP";
+    private static final String ACTION_PLAY_PAUSE = "com.dzekiwolf.blackwoof.action.PLAY_PAUSE";
+    private static final String ACTION_PREVIOUS = "com.dzekiwolf.blackwoof.action.PREVIOUS";
+    private static final String ACTION_NEXT = "com.dzekiwolf.blackwoof.action.NEXT";
+    private static final String ACTION_STOP = "com.dzekiwolf.blackwoof.action.STOP";
 
     private static final String CHANNEL_ID = "playback";
     private static final int NOTIFICATION_ID = 1;
 
+    /** Bits of the actions mask sent by Rust (src/media_session.rs). */
+    private static final int BIT_PLAY_PAUSE = 1;
+    private static final int BIT_PREVIOUS = 2;
+    private static final int BIT_NEXT = 4;
+
     private static volatile PlayerService instance;
 
     private Handler handler;
+    private MediaSession session;
+    private AudioManager audio;
+    private AudioFocusRequest focusRequest;
 
-    /**
-     * Called from native code on the playback thread when the engine reaches a final state.
-     * Rust decides that a call is needed; this only hops to the main thread and ends the
-     * service. packed (state and error) is reserved for the media notification of a later step.
-     */
-    static void onEngineState(int packed) {
+    private int state = PlaybackState.STATE_STOPPED;
+    private String title = "";
+    private String artist = "";
+    private int actions = BIT_PLAY_PAUSE;
+
+    // ---- calls from Rust (any thread); each one hops to the main thread ----------------
+
+    static void show(final int state, final String title, final String artist, final int actions) {
+        post(new Task() {
+            @Override
+            public void run(PlayerService service) {
+                service.apply(state, title, artist, actions);
+            }
+        });
+    }
+
+    static void stopService() {
+        post(new Task() {
+            @Override
+            public void run(PlayerService service) {
+                service.finish();
+            }
+        });
+    }
+
+    static void requestFocus() {
+        post(new Task() {
+            @Override
+            public void run(PlayerService service) {
+                service.requestFocusNow();
+            }
+        });
+    }
+
+    static void abandonFocus() {
+        post(new Task() {
+            @Override
+            public void run(PlayerService service) {
+                service.abandonFocusNow();
+            }
+        });
+    }
+
+    private interface Task {
+        void run(PlayerService service);
+    }
+
+    private static void post(final Task task) {
         final PlayerService service = instance;
         if (service != null) {
             service.handler.post(new Runnable() {
                 @Override
                 public void run() {
-                    service.finish();
+                    task.run(service);
                 }
             });
         }
     }
 
+    // ---- service lifecycle ---------------------------------------------------------------
+
     @Override
     public void onCreate() {
         super.onCreate();
+        Platform.init(this);
         handler = new Handler(Looper.getMainLooper());
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(new NotificationChannel(
-                CHANNEL_ID, "BLACK WOOF", NotificationManager.IMPORTANCE_LOW));
+        audio = getSystemService(AudioManager.class);
+        getSystemService(NotificationManager.class).createNotificationChannel(
+                new NotificationChannel(CHANNEL_ID, "BLACK WOOF", NotificationManager.IMPORTANCE_LOW));
+
+        session = new MediaSession(this, "BlackWoof");
+        session.setCallback(new MediaSession.Callback() {
+            @Override
+            public void onPlay() {
+                command(Native.CMD_PLAY);
+            }
+
+            @Override
+            public void onPause() {
+                command(Native.CMD_PAUSE);
+            }
+
+            @Override
+            public void onStop() {
+                command(Native.CMD_STOP);
+            }
+
+            @Override
+            public void onSkipToNext() {
+                command(Native.CMD_NEXT);
+            }
+
+            @Override
+            public void onSkipToPrevious() {
+                command(Native.CMD_PREVIOUS);
+            }
+        }, handler);
+        session.setActive(true);
+
         // Satisfies startForegroundService() at once, so a later stop can never race it.
         enterForeground();
         instance = this;
@@ -63,16 +156,27 @@ public final class PlayerService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            if (Native.LOADED) {
-                Native.nativeStop();
-            }
+        String action = intent == null ? null : intent.getAction();
+        if (ACTION_STOP.equals(action)) {
+            command(Native.CMD_STOP);
             finish();
             return START_NOT_STICKY;
         }
+        int command = 0;
+        if (ACTION_PLAY_PAUSE.equals(action)) {
+            command = Native.CMD_TOGGLE;
+        } else if (ACTION_PREVIOUS.equals(action)) {
+            command = Native.CMD_PREVIOUS;
+        } else if (ACTION_NEXT.equals(action)) {
+            command = Native.CMD_NEXT;
+        }
+        if (command != 0) {
+            command(command);
+            return START_NOT_STICKY;
+        }
         enterForeground();
-        // The track may have ended or failed before this service got going.
-        if (!Native.LOADED || Native.nativeIsActive() == 0) {
+        // Rust pushes the current picture; if nothing is active there is nothing to keep alive.
+        if (!Native.LOADED || Native.nativeServiceReady() == 0) {
             finish();
         }
         return START_NOT_STICKY;
@@ -82,12 +186,57 @@ public final class PlayerService extends Service {
     public void onDestroy() {
         instance = null;
         handler.removeCallbacksAndMessages(null);
+        if (Native.LOADED) {
+            Native.nativeSave();
+        }
+        abandonFocusNow();
+        session.release();
         super.onDestroy();
     }
 
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    // ---- applying what Rust decided -------------------------------------------------------
+
+    private static void command(int command) {
+        if (Native.LOADED) {
+            Native.nativeCommand(command);
+        }
+    }
+
+    private void apply(int newState, String newTitle, String newArtist, int newActions) {
+        state = newState;
+        title = newTitle == null ? "" : newTitle;
+        artist = newArtist == null ? "" : newArtist;
+        actions = newActions;
+
+        MediaMetadata.Builder metadata = new MediaMetadata.Builder();
+        if (!title.isEmpty()) {
+            metadata.putString(MediaMetadata.METADATA_KEY_TITLE, title);
+        }
+        if (!artist.isEmpty()) {
+            metadata.putString(MediaMetadata.METADATA_KEY_ARTIST, artist);
+        }
+        session.setMetadata(metadata.build());
+
+        long mask = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
+                | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_STOP;
+        if ((actions & BIT_PREVIOUS) != 0) {
+            mask |= PlaybackState.ACTION_SKIP_TO_PREVIOUS;
+        }
+        if ((actions & BIT_NEXT) != 0) {
+            mask |= PlaybackState.ACTION_SKIP_TO_NEXT;
+        }
+        // No position is sent: the system would otherwise want periodic updates.
+        session.setPlaybackState(new PlaybackState.Builder()
+                .setActions(mask)
+                .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                .build());
+
+        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification());
     }
 
     private void enterForeground() {
@@ -105,22 +254,78 @@ public final class PlayerService extends Service {
         stopSelf();
     }
 
+    private PendingIntent pending(String action, int requestCode) {
+        return PendingIntent.getService(this, requestCode,
+                new Intent(this, PlayerService.class).setAction(action),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
     private Notification buildNotification() {
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        PendingIntent stop = PendingIntent.getService(this, 1,
-                new Intent(this, PlayerService.class).setAction(ACTION_STOP),
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        // A notification must have a small icon; the framework's own drawable keeps the APK
-        // free of image resources.
-        return new Notification.Builder(this, CHANNEL_ID)
+        boolean playing = state == PlaybackState.STATE_PLAYING;
+
+        // A notification must have a small icon; the framework's own drawable keeps the
+        // notification free of anything we would have to draw. No artwork, ever.
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle("BLACK WOOF")
-                .setOngoing(true)
+                .setContentTitle(title.isEmpty() ? "BLACK WOOF" : title)
+                .setContentText(artist)
+                .setOngoing(playing)
                 .setCategory(Notification.CATEGORY_TRANSPORT)
-                .setContentIntent(open)
-                .addAction(0, "STOP", stop)
-                .build();
+                .setContentIntent(open);
+
+        int[] compact = new int[3];
+        int shown = 0;
+        int index = 0;
+        if ((actions & BIT_PREVIOUS) != 0) {
+            builder.addAction(0, "PREV", pending(ACTION_PREVIOUS, 2));
+            compact[shown++] = index++;
+        }
+        builder.addAction(0, playing ? "PAUSE" : "PLAY", pending(ACTION_PLAY_PAUSE, 3));
+        compact[shown++] = index++;
+        if ((actions & BIT_NEXT) != 0) {
+            builder.addAction(0, "NEXT", pending(ACTION_NEXT, 4));
+            compact[shown++] = index++;
+        }
+        builder.addAction(0, "STOP", pending(ACTION_STOP, 5));
+
+        Notification.MediaStyle style = new Notification.MediaStyle()
+                .setMediaSession(session.getSessionToken());
+        style.setShowActionsInCompactView(Arrays.copyOf(compact, shown));
+        builder.setStyle(style);
+        return builder.build();
+    }
+
+    // ---- audio focus: Android asks, Rust decides -------------------------------------------
+
+    private void requestFocusNow() {
+        if (focusRequest == null) {
+            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build())
+                    .setOnAudioFocusChangeListener(new AudioManager.OnAudioFocusChangeListener() {
+                        @Override
+                        public void onAudioFocusChange(int change) {
+                            if (Native.LOADED) {
+                                Native.nativeFocus(change);
+                            }
+                        }
+                    }, handler)
+                    .build();
+        }
+        int result = audio.requestAudioFocus(focusRequest);
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED && Native.LOADED) {
+            Native.nativeFocus(Native.FOCUS_DENIED);
+        }
+    }
+
+    private void abandonFocusNow() {
+        if (focusRequest != null) {
+            audio.abandonAudioFocusRequest(focusRequest);
+        }
     }
 }

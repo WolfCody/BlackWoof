@@ -1,27 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Stage 3.1: local audio library + foreground service.
-     INTERNET must never appear. minSdk/targetSdk/version are passed to aapt2 by
-     scripts/build_apk.sh. -->
+<!-- Four permissions, nothing else, never INTERNET: scripts/verify_apk.sh enforces this exact set.
+     FOREGROUND_SERVICE(+_MEDIA_PLAYBACK): the service that keeps playback alive.
+     READ_MEDIA_AUDIO (API 33+) / READ_EXTERNAL_STORAGE (API 28-32): the music list; asked for only
+     when the user first opens it. minSdk/targetSdk/version are passed to aapt2 by build_apk.sh. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.dzekiwolf.blackwoof">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:label="BLACK WOOF"
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:extractNativeLibs="false"
         android:theme="@android:style/Theme.Black.NoTitleBar">
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Open audio files with BLACK WOOF. Only formats the decoder really handles
+                 (MP3, FLAC, WAV, OGG Vorbis). The file is never passed on to another app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="audio/mpeg" />
+                <data android:mimeType="audio/mp3" />
+                <data android:mimeType="audio/flac" />
+                <data android:mimeType="audio/x-flac" />
+                <data android:mimeType="audio/wav" />
+                <data android:mimeType="audio/x-wav" />
+                <data android:mimeType="audio/ogg" />
+                <data android:mimeType="application/ogg" />
             </intent-filter>
         </activity>
 

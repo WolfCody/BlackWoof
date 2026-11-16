@@ -23,8 +23,8 @@ BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-35.0.0}"
 PLATFORM_API="${PLATFORM_API:-35}"
 MIN_SDK=28
 TARGET_SDK=35
-VERSION_CODE=2
-VERSION_NAME="0.2.0-stage2"
+VERSION_CODE=3
+VERSION_NAME="0.3.0-stage3"
 TARGET="aarch64-linux-android"
 APK_NAME="BlackWoof-stage2"
 LIB="libblackwoof.so"
@@ -125,8 +125,11 @@ cp "$OUT/java1/dex/classes.dex" "$STAGE/classes.dex"
 cp "$OUT/$LIB" "$STAGE/lib/arm64-v8a/$LIB"
 find "$STAGE" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
+# Launcher icon resources (res/): compiled, then linked next to the manifest.
+# "-0 arsc": resources.arsc stays uncompressed (required for apps targeting Android 11+).
+"$BT/aapt2" compile --dir "$ROOT/res" -o "$OUT/res.zip"
 "$BT/aapt2" link -o "$OUT/base.apk" \
-  --manifest "$ROOT/android/AndroidManifest.xml" -I "$ANDROID_JAR" \
+  --manifest "$ROOT/android/AndroidManifest.xml" -I "$ANDROID_JAR" -R "$OUT/res.zip" -0 arsc \
   --min-sdk-version "$MIN_SDK" --target-sdk-version "$TARGET_SDK" \
   --version-code "$VERSION_CODE" --version-name "$VERSION_NAME"
 

@@ -1,15 +1,22 @@
-//! BLACK WOOF, Stage 2: audio engine and decoder.
+//! BLACK WOOF: audio engine, queue, saved state and text screen, all in Rust.
 //!
-//! Policy for this crate: no logging, no diagnostic counters, nothing written to disk.
-//! Errors are values (`Result<_, Error>`). A panic never crosses the JNI boundary.
+//! Policy for this crate: no logging, no diagnostic counters, and the only thing written to
+//! disk is the last playback (`storage`). Errors are values (`Result<_, Error>`). A panic never
+//! crosses the JNI boundary.
 
 pub mod audio_engine;
 pub mod decoder;
 pub mod error;
 pub mod guard;
+pub mod media_session;
+pub mod playlist;
+pub mod storage;
+pub mod ui;
 
 #[cfg(unix)]
 pub mod fd;
+#[cfg(unix)]
+pub mod playback_controller;
 
 #[cfg(target_os = "android")]
 mod aaudio;
