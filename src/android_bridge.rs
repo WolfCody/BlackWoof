@@ -282,7 +282,7 @@ pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeClick(
 /// The whole screen as lines (see `ui.rs`). Null only if a panic was caught.
 #[no_mangle]
 pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeScreen<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
     silence_panics();
@@ -348,7 +348,7 @@ pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativePermissionResul
 /// Android launched BLACK WOOF with an audio URI (ACTION_VIEW). Returns effect flags.
 #[no_mangle]
 pub extern "system" fn Java_com_dzekiwolf_blackwoof_Native_nativeOpenExternal<'local>(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     uri: JString<'local>,
 ) -> i32 {
