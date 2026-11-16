@@ -94,10 +94,10 @@ grep -q '^libaaudio.so$' <<<"$NEEDED" || fail "libaaudio.so is not linked"
 ok "dependencies are limited to libaaudio, libc, libm, libdl"
 
 EXPORTS="$("$NM" -D --defined-only "$SO" | awk '{ print $3 }' | grep "^$JNI_PREFIX" | sort || true)"
-for name in nativeApiVersion nativePlay nativePause nativeResume nativeStop nativeState nativeIsActive nativeShutdown; do
+for name in nativeApiVersion nativeInit nativeClick nativeScreen nativeItem nativeItemCount nativeCommand nativeFocus nativePermissionResult nativeOpenExternal nativeServiceReady nativeSave nativeShutdown; do
   grep -qx "$JNI_PREFIX$name" <<<"$EXPORTS" || fail "missing JNI export: $name"
 done
-ok "all 8 JNI exports are present"
+ok "all 13 JNI exports are present"
 ALL_DEFINED="$("$NM" -D --defined-only "$SO" | awk '{ print $3 }')"
 grep -qx 'JNI_OnLoad' <<<"$ALL_DEFINED" || fail "missing JNI_OnLoad (Rust to Java callbacks)"
 ok "JNI_OnLoad is present"
